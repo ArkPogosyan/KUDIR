@@ -1,127 +1,96 @@
 import pandas as pd
 import re
-import os
+from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog
 
 
-def read_excel_file(file_path):
+def extract_contractor(description):
     """
-    Читает Excel-файл и возвращает DataFrame.
+    Функция для извлечения названия контрагента из описания.
     """
-    try:
-        # Чтение файла Excel, пропуск второй строки с номерами столбцов
-        df = pd.read_excel(file_path, skiprows=[1], engine='openpyxl')
-        return df
-    except Exception as e:
-        print(f"Ошибка чтения файла: {str(e)}")
+    if not isinstance(description, str):
         return None
 
+    # Регулярное выражение для поиска контрагентов
+    patterns = [
+        r'"(?:ООО|АО|ИП|ПАО)\s+([^"]+)"',  # Например: "ООО АМД КОМПАНИ"
+        r'(?:ООО|АО|ИП|ПАО)\s+"?([^"]+)"?',  # Например: ООО "АТЛАНТИДА" или ООО АТЛАНТИДА
+        r'"ТВ\s+"[^"]+"\s+И\s+КО"',  # Например: "ТВ "АД РУСС" И КО"
+    ]
 
-def extract_contragent(text):
-    """
-    Извлекает название контрагента из текста.
-    Признаки контрагента: ООО, АО, ПАО, ИП перед названием в кавычках.
-    """
-    pattern = r'(ООО|АО|ПАО|ИП)\s+"([^"]+)"'
-    match = re.search(pattern, text, re.IGNORECASE)
-    if match:
-        return f"{match.group(1).upper()} \"{match.group(2)}\""
+    for pattern in patterns:
+        match = re.search(pattern, description)
+        if match:
+            contractor = match.group(1).strip()
+            return contractor
+
     return None
 
 
-def process_data(df):
+def process_excel_file(file_path):
     """
-    Обрабатывает данные, находит всех контрагентов и вычисляет их параметры.
+    Основная функция для обработки файла Excel.
     """
-    contragents_data = {}
+    try:
+        # Чтение файла, пропуск первых 6 строк
+        df = pd.read_excel(file_path, header=None, skiprows=6)
 
-    for _, row in df.iterrows():
-        operation = str(row['содержание_операции'])
-        contragent = extract_contragent(operation)
+        # Переименование столбцов для удобства работы
+        df.columns = ['ID', 'Date_and_Doc', 'Description', 'Contractor_Info', 'Income', 'Expenses']
 
-        if contragent:
-            total_expenses = pd.to_numeric(
-                str(row['расходы_-_всего']).replace(',', '.').replace(' ', ''),
-                errors='coerce'
-            )
-            tax_base_expenses = pd.to_numeric(
-                str(row['в_т.ч._расходы,_учитываемые_при_исчислении_налоговой_базы']).replace(',', '.').replace(' ',
-                                                                                                                ''),
-                errors='coerce'
-            )
+        # Удаление строк, где столбец Expenses пустой или NaN
+        df = df.dropna(subset=['Expenses'])
 
-            if contragent not in contragents_data:
-                contragents_data[contragent] = {
-                    'total_expenses': 0,
-                    'tax_base_expenses': 0
-                }
+        # Очистка столбца Expenses от запятых и преобразование в числа
+        df['Expenses'] = df['Expenses'].apply(
+            lambda x: float(str(x).replace(',', '.')) if isinstance(x, str) else x
+        )
 
-            contragents_data[contragent]['total_expenses'] += total_expenses if pd.notnull(total_expenses) else 0
-            contragents_data[contragent]['tax_base_expenses'] += tax_base_expenses if pd.notnull(
-                tax_base_expenses) else 0
+        # Извлечение названий контрагентов из столбца Contractor_Info
+        df['Contractor'] = df['Contractor_Info'].apply(extract_contractor)
 
-    return contragents_data
+        # Удаление строк без найденных контрагентов
+        df = df.dropna(subset=['Contractor'])
+
+        # Группировка данных по контрагентам и суммирование расходов
+        result = df.groupby('Contractor')['Expenses'].sum().reset_index()
+
+        # Округление сумм до двух знаков после запятой
+        result['Expenses'] = result['Expenses'].round(2)
+
+        # Путь для сохранения результата
+        output_path = file_path.parent / f"result_{file_path.stem}.xlsx"
+
+        # Сохранение результата в новый файл
+        result.to_excel(output_path, index=False, engine='openpyxl')
+        print(f"Результат сохранен: {output_path}")
+
+    except Exception as e:
+        print(f"Ошибка при обработке файла: {e}")
 
 
-def save_results_to_excel(contragents_data, output_file):
+def main():
     """
-    Сохраняет результаты в Excel-файл.
+    Главная функция программы.
     """
-    results = []
-    for contragent, data in contragents_data.items():
-        results.append({
-            'Контрагент': contragent,
-            'Всего расходов': data['total_expenses'],
-            'Для налоговой базы': data['tax_base_expenses'],
-            'Разница': data['total_expenses'] - data['tax_base_expenses']
-        })
+    # Создаем скрытое окно Tkinter
+    root = tk.Tk()
+    root.withdraw()
 
-    result_df = pd.DataFrame(results)
-    result_df.to_excel(output_file, index=False, engine='openpyxl')
-    print(f"Результаты сохранены в файл: {output_file}")
+    # Открываем диалог выбора файла
+    file_path = filedialog.askopenfilename(
+        title="Выберите файл Excel",
+        filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")]
+    )
+
+    if not file_path:
+        print("Файл не выбран. Программа завершена.")
+        return
+
+    # Обрабатываем выбранный файл
+    process_excel_file(Path(file_path))
 
 
-# Основная программа
 if __name__ == "__main__":
-    # Предлагаем путь по умолчанию
-    default_path = r"C:\Users\Ark\Downloads\data.xlsx"
-    input_file = input(f"Введите путь к входному Excel-файлу (по умолчанию: {default_path}): ").strip()
-
-    # Если пользователь не ввел путь, используем путь по умолчанию
-    if not input_file:
-        input_file = default_path
-
-    # Проверяем существование файла
-    if not os.path.isfile(input_file):
-        print("Ошибка: Указанный файл не существует.")
-        exit()
-
-    # Чтение файла
-    df = read_excel_file(input_file)
-    if df is None:
-        exit()
-
-    # Приводим названия столбцов к стандартному виду
-    df.columns = [col.strip().lower().replace(' ', '_') for col in df.columns]
-
-    # Проверяем наличие нужных столбцов
-    required_columns = [
-        'содержание_операции',
-        'расходы_-_всего',
-        'в_т.ч._расходы,_учитываемые_при_исчислении_налоговой_базы'
-    ]
-
-    missing_cols = [col for col in required_columns if col not in df.columns]
-    if missing_cols:
-        print(f"Ошибка: Отсутствуют обязательные столбцы: {', '.join(missing_cols)}")
-        exit()
-
-    # Обработка данных
-    contragents_data = process_data(df)
-
-    # Запрашиваем имя выходного файла
-    output_file = input("\nВведите имя файла для сохранения результатов (например, results.xlsx): ").strip()
-    if not output_file.endswith('.xlsx'):
-        output_file += '.xlsx'
-
-    # Сохраняем результаты
-    save_results_to_excel(contragents_data, output_file)
+    main()
